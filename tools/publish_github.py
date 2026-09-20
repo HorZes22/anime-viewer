@@ -63,9 +63,26 @@ SOURCE_FILES = [
     "run-detached.bat",
     "run.ps1",
     ".gitignore",
+    "pytest.ini",
     "LICENSE",
+    # модули рядом с main.py (источники, оформление, трей, Shikimori, ранобэ)
+    "kodik.py",
+    "sibnet.py",
+    "themes_ext.py",
+    "accent.py",
+    "mica.py",
+    "fonts_ext.py",
+    "tray_icon.py",
+    "mini_player.py",
+    "hotkeys.py",
+    "hls_download.py",
+    "ongoings.py",
+    "ranobe.py",
+    "applog.py",
+    "shikimori_oauth.py",
+    "shikimori_api.py",
 ]
-SOURCE_DIRS = ["assets", "plugins", "sources_local", "tools"]
+SOURCE_DIRS = ["anime_viewer", "assets", "plugins", "sources_local", "tools", "tests"]
 SKIP_PARTS = {"__pycache__", "dist", "cache", "probe"}
 SKIP_SUFFIXES = {".pyc", ".pyo", ".lnk"}
 

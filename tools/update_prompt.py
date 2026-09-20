@@ -15,7 +15,13 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, str(ROOT))
 
-source_text = (ROOT / "main.py").read_text(encoding="utf-8")
+# Код приложения после разделения лежит в пакете (anime_viewer/_core.py), а main.py
+# стал shim'ом. Для PROMPT_UI.md нужен именно код оформления, поэтому берём тот
+# файл, где он действительно есть.
+CORE = ROOT / "anime_viewer" / "_core.py"
+SOURCE = CORE if CORE.exists() else ROOT / "main.py"
+source_text = SOURCE.read_text(encoding="utf-8")
+print(f"разбираю: {SOURCE.relative_to(ROOT)}")
 
 
 def extract(start_marker: str, end_marker: str) -> str:

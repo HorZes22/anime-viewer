@@ -214,8 +214,30 @@ download_page() вызываются не в потоке интерфейса. 
             }
         }
 
-Встроенные темы (dark, midnight, light, contrast) плагин перекрыть не может —
-такая тема будет пропущена с предупреждением в списке плагинов.
+Цвета можно задавать и «человеческими» именами — приложение разложит их по своим
+ключам:
+
+    background -> bg          surface     -> panel        surface_alt -> card
+    hover      -> card_hover  selected    -> card_hover   text_muted  -> muted
+    outline    -> border      divider     -> border       field       -> input
+    field_focus-> input_focus video       -> player
+
+Необязательные ключи:
+
+    "accent": "#ff7a59"                      — акцент темы (иначе останется текущий)
+    "gradient": ["#241521", "#150d13"]       — вертикальный градиент фона окна
+    "font_family": "Inter"                   — шрифт темы: положите .ttf/.otf
+                                               в assets\fonts, приложение подключит
+                                               его при запуске
+
+Встроенные темы (dark, midnight, light, contrast) и 8 схем из themes_ext.py
+(Dracula, Nord, Solarized, Catppuccin, Gruvbox, Tokyo Night, Kanagawa, Ayu) плагин
+перекрыть не может — такая тема будет пропущена с предупреждением в списке плагинов.
+Если в палитре опечатка в цвете, приложение напишет об этом там же, а не «сломает»
+оформление молча.
+
+Готовый рабочий пример: plugins\_example_theme_plugin.py — скопируйте его под другим
+именем (без «_» в начале), и тема появится в «Оформлении».
 
 
 КНОПКИ
