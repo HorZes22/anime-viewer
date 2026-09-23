@@ -51,6 +51,10 @@ import requests
 # «своим» (MultiVideoSource сравнивает типы) и переиспользует настройки сети.
 from main import REQUEST_TIMEOUT, USER_AGENT, VideoSource, _title_similarity
 
+# Кэш с TTL (см. cache_manager.py): список качеств серии и сами ссылки живут
+# 10 минут, поэтому переключение озвучки/качества не бьёт по сети каждый раз.
+from cache_manager import QUALITY_CACHE
+
 # Хосты API: kodik-api.com — текущий, kodikapi.com — старый (оставлен на случай
 # возврата; на него в коде парсеров чаще всего и ссылаются).
 KODIK_API_HOSTS = ("https://kodik-api.com", "https://kodikapi.com")
@@ -67,6 +71,28 @@ KODIK_FALLBACK_TOKEN = "447d179e875efe44217f20d1ee2146be"
 KODIK_QUALITIES = ("1080", "720", "480", "360")
 # Сколько живёт разобранная страница плеера: подписи в ней содержат метку времени.
 PAGE_TTL = 25 * 60
+# Сколько живёт кэш ссылок на серию (и, значит, список доступных качеств).
+STREAM_TTL = 10 * 60
+
+
+def quality_label(key: Any) -> str:
+    """
+    «1080» / «1080p» / «BDRip 1080» -> «1080p» — подпись качества для списка в UI.
+
+    Kodik называет качества по-разному (в /ftor это ключи вида «480», в ссылке
+    плеера — «720p»), поэтому приводим к одному виду.
+    """
+    digits = re.findall(r"\d+", str(key or ""))
+    return f"{digits[0]}p" if digits else str(key or "").strip()
+
+
+def quality_rank(label: str) -> int:
+    """Число из подписи качества — для сортировки от лучшего к худшему."""
+    digits = re.findall(r"\d+", str(label or ""))
+    try:
+        return int(digits[0]) if digits else 0
+    except (IndexError, ValueError):
+        return 0
 
 
 def decode_src(src: str) -> str:
@@ -412,17 +438,52 @@ class KodikClient:
 
     @staticmethod
     def best_link(links: list[tuple[str, str]]) -> str:
-        """Лучшая ссылка из доступных: 1080 -> 720 -> 480 -> 360 -> любая."""
+        """
+        Лучшая ссылка из доступных (1080 → 720 → 480 → 360).
+
+        Сравниваем по числу из подписи качества, а не по порядку ключей в ответе:
+        Kodik отдаёт их вперемешку, и «первый ключ» вполне может оказаться 360p.
+        """
         if not links:
             return ""
         by_quality: dict[str, str] = {}
         for quality, url in links:
-            if quality not in by_quality:
-                by_quality[quality] = url
-        for quality in KODIK_QUALITIES:
-            if quality in by_quality:
-                return by_quality[quality]
-        return next(iter(by_quality.values()))
+            label = quality_label(quality)
+            if label and label not in by_quality:
+                by_quality[label] = url
+        if not by_quality:
+            return links[0][1]
+        return by_quality[max(by_quality, key=quality_rank)]
+
+    # ---------- выбор качества ----------
+    @staticmethod
+    def qualities_of(links: list[tuple[str, str]]) -> list[str]:
+        """
+        Доступные качества серии: «1080p», «720p», «480p» — от лучшего к худшему.
+
+        Именно этот список показывается в списке «Качество» рядом с озвучкой.
+        """
+        labels = {quality_label(quality) for quality, _url in links if str(quality).strip()}
+        return sorted((label for label in labels if label), key=quality_rank, reverse=True)
+
+    @staticmethod
+    def link_for_quality(links: list[tuple[str, str]], quality: str = "") -> str:
+        """
+        Ссылка нужного качества. Пустая строка — «авто»: берём лучшее (best_link).
+
+        Если запрошенного качества у серии нет (Kodik отдаёт не все), возвращаем
+        лучшее доступное: серия должна играть, а не молча не запускаться.
+        """
+        if not links:
+            return ""
+        wanted = str(quality or "").strip()
+        if not wanted:
+            return KodikClient.best_link(links)
+        target = quality_rank(wanted)
+        for quality_key, url in links:
+            if quality_rank(quality_label(quality_key)) == target:
+                return url
+        return KodikClient.best_link(links)
 
 
 class KodikVideoSource(VideoSource):
@@ -437,16 +498,24 @@ class KodikVideoSource(VideoSource):
     name = "kodik"
     label = "Kodik"
     annotate_dubbings = True     # подписывать озвучки именем источника в списке
+    supports_quality = True      # умеет отдавать несколько качеств (см. get_qualities)
+    quality: str = ""            # выбранное качество: "" — «авто» (лучшее доступное)
 
     def __init__(self, client: Optional[KodikClient] = None) -> None:
         self.client = client or KodikClient()
         self.last_referer = ""
+        # Выбранное качество: его ставит интерфейс (см. MultiVideoSource.set_quality),
+        # а get_qualities() использует озвучку из quality_dubbing как значение по умолчанию
+        self.quality = ""
+        self.quality_dubbing = ""
         # кэши: страницы плеера, соответствие «озвучка -> перевод» и готовые ссылки
         self._pages: dict[str, KodikPage] = {}
         self._translation_pages: dict[tuple[int, int], KodikPage] = {}
         self._translations: dict[int, list[dict]] = {}
         self._translation_map: dict[tuple[int, str], dict] = {}
-        self._streams: dict[tuple[int, int, str], str] = {}
+        self._translation_names: dict[int, str] = {}   # id тайтла -> имя озвучки Kodik
+        # ключ ссылки включает качество: переключение туда-обратно идёт из кэша
+        self._streams: dict[tuple[int, int, str, str], str] = {}
         self._lock = threading.Lock()
 
     # ---------- служебное ----------
@@ -578,31 +647,36 @@ class KodikVideoSource(VideoSource):
             return None
         return [(number, "") for number in sorted(page.episodes)]
 
-    def get_stream_url(self, anime_id: int, episode: int, dubbing: str) -> Optional[str]:
-        """Прямая HLS-ссылка (m3u8) нужной серии в нужной озвучке."""
-        self.last_referer = ""
-        key = (int(anime_id), int(episode), str(dubbing))
-        cached = self._streams.get(key)
+    def _variants(self, anime_id: int, episode: int,
+                  dubbing: str) -> list[tuple[str, str]]:
+        """
+        Все ссылки серии по качествам: [(«720p», url), («480p», url), …].
+
+        Это «дорогой» путь (страница плеера + /ftor), поэтому результат кладётся в
+        кэш на 10 минут: список качеств и переключение между ними после первого
+        запроса мгновенные и не тратят трафик.
+        """
+        key = ("kodik", int(anime_id), int(episode), str(dubbing))
+        cached = QUALITY_CACHE.get(key)
         if cached:
-            self.last_status = f"Kodik: {dubbing} (из кэша)"
-            return cached
+            return list(cached)
 
         page = self._default_page(int(anime_id))
         if page is None:
             self.last_status = f"Kodik: {self.client.last_error or 'тайтла нет'}"
-            return None
+            return []
 
         translation = (self._translation_map.get((int(anime_id), str(dubbing)))
                        or self._match_translation(int(anime_id), dubbing, page))
         if translation is None:
             names = ", ".join(item["name"] for item in page.translations[:10])
             self.last_status = f"в Kodik нет озвучки «{dubbing}» (есть: {names})"
-            return None
+            return []
 
         trans_page = self._page_for_translation(int(anime_id), page, translation)
         if trans_page is None:
             self.last_status = f"Kodik: {self.client.last_error or 'страница озвучки недоступна'}"
-            return None
+            return []
 
         media = trans_page.episodes.get(int(episode))
         if media is None:
@@ -615,21 +689,72 @@ class KodikVideoSource(VideoSource):
                     f"в Kodik у озвучки «{translation['name']}» нет серии {episode}"
                     + (f" (всего серий: {total})" if total else "")
                 )
-                return None
+                return []
 
         links = self.client.ftor(
             trans_page, media["id"], media["hash"], trans_page.media_type
         )
-        url = self.client.best_link(links)
+        if not links:
+            self.last_status = f"Kodik: {self.client.last_error or 'поток не получен'}"
+            return []
+
+        # ключ качества приводим к подписи («720» -> «720p»): так его понимает UI
+        normalized = [(quality_label(quality), url) for quality, url in links if url]
+        with self._lock:
+            self._translation_names[int(anime_id)] = translation["name"]
+        QUALITY_CACHE.set(key, normalized, ttl=STREAM_TTL)
+        return normalized
+
+    def get_qualities(self, anime_id: int, episode: int, dubbing: str = "") -> list[str]:
+        """
+        Доступные качества серии в выбранной озвучке: [«1080p», «720p», …].
+
+        Метод ходит в сеть (как и get_stream_url), поэтому вызывается из фонового
+        потока. Пустой список означает «источник качеств не знает» — тогда в списке
+        останется только пункт «Авто (лучшее)».
+        """
+        dubbing = str(dubbing or self.quality_dubbing or "")
+        if not dubbing:
+            # без озвучки качеств не узнать: они зависят от страницы перевода
+            return []
+        links = self._variants(int(anime_id), int(episode), dubbing)
+        return self.client.qualities_of(links)
+
+    def get_stream_url(self, anime_id: int, episode: int, dubbing: str,
+                       quality: str = "") -> Optional[str]:
+        """
+        Прямая HLS-ссылка (m3u8) нужной серии, озвучки и качества.
+
+        quality: «720p» / «480p» / «» — авто (лучшее доступное). Если качество не
+        указано явно, берётся self.quality — его выставляет интерфейс при выборе в
+        списке «Качество» (сигнатуру метода менять не пришлось).
+        """
+        self.last_referer = ""
+        wanted = str(quality or self.quality or "")
+        key = (int(anime_id), int(episode), str(dubbing), wanted)
+        cached = self._streams.get(key)
+        if cached:
+            self.last_status = f"Kodik: {dubbing} (из кэша)"
+            return cached
+
+        links = self._variants(int(anime_id), int(episode), dubbing)
+        if not links:
+            return None      # причина уже лежит в last_status (см. _variants)
+
+        url = self.client.link_for_quality(links, wanted)
         if not url:
             self.last_status = f"Kodik: {self.client.last_error or 'поток не получен'}"
             return None
 
+        best = self.client.qualities_of(links)
+        best_label = best[0] if best else ""
+        selected = quality_label(wanted) if wanted else ""
         with self._lock:
             self._streams[key] = url
+        name = self._translation_names.get(int(anime_id), dubbing)
         self.last_status = (
-            f"Kodik: {translation['name']}, серия {episode}"
-            + (f" ({trans_page.quality})" if trans_page.quality else "")
+            f"Kodik: {name}, серия {episode}"
+            + (f" ({selected})" if selected else f" (авто, {best_label})")
         )
         return url
 

@@ -42,6 +42,9 @@ class AppTray:
         self.window = window
         self.available = QSystemTrayIcon.isSystemTrayAvailable()
         self.tray: Optional[QSystemTrayIcon] = None
+        # Пункт меню «Скачать обновление»: включается, когда найден релиз новее
+        # (см. MainWindow.on_update_available и update_checker.py)
+        self.update_action: Optional[Any] = None
         self._icon = icon
         self._title = title
         if not self.available:
@@ -67,6 +70,15 @@ class AppTray:
         next_action = menu.addAction("Следующая серия")
         next_action.triggered.connect(actions.get("next_episode", lambda: None))
         menu.addSeparator()
+        # Обновления (update_checker.py): «Скачать обновление» активируется, только
+        # когда действительно есть версия новее, а проверить можно в любой момент.
+        update_action = menu.addAction("Скачать обновление")
+        update_action.triggered.connect(actions.get("download_update", lambda: None))
+        update_action.setEnabled(False)
+        self.update_action = update_action
+        check_action = menu.addAction("Проверить обновления")
+        check_action.triggered.connect(actions.get("check_updates", lambda: None))
+        menu.addSeparator()
         quit_action = menu.addAction("Выход")
         quit_action.triggered.connect(actions.get("quit", lambda: None))
 
@@ -87,7 +99,7 @@ class AppTray:
 
     # ------------------------------------------------------------------ сообщения
     def notify(self, title: str, text: str) -> None:
-        """Показывает системное уведомление (например, «серия скачана»)."""
+        """Показывает системное уведомление (например, «Доступна версия 1.6»)."""
         if self.tray is None:
             return
         try:
@@ -96,6 +108,23 @@ class AppTray:
             self.tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Information, 4000)
         except Exception as exc:  # noqa: BLE001 — уведомление не критично
             print(f"[трей] уведомление не показано: {exc}")
+
+    def set_update_available(self, available: bool, version: str = "") -> None:
+        """
+        Включает/выключает пункт «Скачать обновление» в меню трея.
+
+        Вызывается из главного окна, когда проверка обновлений нашла новую версию
+        (см. MainWindow.on_update_available).
+        """
+        if self.update_action is None:
+            return
+        try:
+            self.update_action.setEnabled(bool(available))
+            self.update_action.setText(
+                f"Скачать обновление {version}".strip() if available else "Скачать обновление"
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_tooltip(self, text: str) -> None:
         if self.tray is not None:

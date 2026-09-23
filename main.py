@@ -26,8 +26,33 @@ if str(_APP_DIR) not in sys.path:
 # отдаём плагинам и внешним источникам ровно этот модуль
 sys.modules.setdefault("main", sys.modules[__name__])
 
+# Заставка (splash.py) запускается ЗДЕСЬ, до импорта PySide6: пока грузятся Qt и
+# код приложения, пользователь видит окно «Загружаю…», а не пустой экран.
+# Если tkinter в сборке нет (в портативном Python его обычно нет) — ничего не
+# происходит, и заставку покажет уже PySide6 (см. anime_viewer/_core.py → main()).
+_splash_tk = False
+try:
+    import splash as _splash
+
+    _splash_tk = _splash.show_tkinter()
+except Exception as _splash_error:  # noqa: BLE001 — заставка не важнее запуска
+    print(f"[заставка] не подключена: {_splash_error}")
+
 from anime_viewer._core import *          # noqa: E402,F401,F403
 
 
+def _close_splash() -> None:
+    """Убирает tkinter-заставку, когда окно PySide6 уже показано."""
+    if not _splash_tk:
+        return
+    try:
+        _splash.close_tkinter()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 if __name__ == "__main__":
-    sys.exit(main())                      # noqa: F821 — main() приходит из _core
+    try:
+        sys.exit(main())                  # noqa: F821 — main() приходит из _core
+    finally:
+        _close_splash()
